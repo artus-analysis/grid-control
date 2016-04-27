@@ -158,11 +158,11 @@
 
        * grid_control.backends.access RefreshableAccessToken
 
-        * grid_control.backends.access AFSAccessToken AFSProxy
+        * grid_control.backends.access AFSAccessToken afs AFSProxy
 
-       * grid_control.backends.access VomsProxy
+       * grid_control.backends.access VomsAccessToken voms VomsProxy
 
-      * grid_control.backends.access TrivialAccessToken TrivialProxy
+      * grid_control.backends.access TrivialAccessToken trivial TrivialProxy
 
      * grid_control.backends.broker_base Broker
 
