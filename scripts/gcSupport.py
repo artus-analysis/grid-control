@@ -22,7 +22,7 @@ from grid_control import utils
 from grid_control.config import createConfig
 from grid_control.job_db import Job, JobClass, JobDB
 from grid_control.job_selector import ClassSelector, JobSelector
-from grid_control.output_processor import FileInfoProcessor, JobInfoProcessor
+from grid_control.output_processor import FileInfoProcessor, JobInfoProcessor, JobResult
 from grid_control.utils.cmd_options import Options
 from hpfwk import Plugin
 from python_compat import ifilter, imap, tarfile
