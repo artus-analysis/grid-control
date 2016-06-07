@@ -304,7 +304,7 @@ class BasicWMS(WMS):
 			# This can help avoiding too large environments
 			# TODO: send fileNames.job_%d.txt together with the sandbox
 			if ("FILE_NAMES" in jobEnv) and (not self.fileNamesEnvironment):
-				fileNamesList = os.path.join(self.config.getPath('sandbox path', self.config.getWorkPath('sandbox'), mustExist = False), "fileNames.job_%d.txt" % jobNum)
+				fileNamesList = os.path.join(self.config.getPath('sandbox path', self.config.getWorkPath('sandbox')), "fileNames.job_%d.txt" % jobNum)
 				with open(fileNamesList, "w") as fileNamesListFile:
 					fileNamesListFile.write("\n".join(shlex.split(jobEnv.pop("FILE_NAMES"))))
 				jobEnv["FILE_NAMES"] = fileNamesList
