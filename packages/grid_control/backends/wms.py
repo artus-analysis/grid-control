@@ -25,6 +25,7 @@ from grid_control.utils.file_objects import SafeFile, VirtualFile
 from grid_control.utils.gc_itertools import ichain, lchain
 from hpfwk import AbstractError, NestedException
 from python_compat import imap, izip, lmap, set, sorted
+import shlex
 
 class BackendError(NestedException):
 	pass
@@ -143,6 +144,8 @@ class BasicWMS(WMS):
 		self.smSEOut = config.getPlugin('se output manager', 'SEStorageManager', cls = StorageManager,
 			tags = [self], pargs = ('se', 'se output', 'SE_OUTPUT'))
 		self.smSBOut = None
+		
+		self.fileNamesEnvironment = config.getBool("file names environment", True, onChange = None)
 
 
 	def canSubmit(self, neededTime, canCurrentlySubmit):
@@ -296,6 +299,16 @@ class BasicWMS(WMS):
 		try:
 			jobEnv = utils.mergeDicts([task.getJobConfig(jobNum), extras])
 			jobEnv['GC_ARGS'] = task.getJobArguments(jobNum).strip()
+			
+			# write $FILE_NAMES into file in case [wms] file names environment = False
+			# This can help avoiding too large environments
+			# TODO: send fileNames.job_%d.txt together with the sandbox
+			if ("FILE_NAMES" in jobEnv) and (not self.fileNamesEnvironment):
+				fileNamesList = os.path.join(self.config.getPath('sandbox path', self.config.getWorkPath('sandbox'), mustExist = False), "fileNames.job_%d.txt" % jobNum)
+				with open(fileNamesList, "w") as fileNamesListFile:
+					fileNamesListFile.write("\n".join(shlex.split(jobEnv.pop("FILE_NAMES"))))
+				jobEnv["FILE_NAMES"] = fileNamesList
+			
 			content = utils.DictFormat(escapeString = True).format(jobEnv, format = 'export %s%s%s\n')
 			utils.safeWrite(open(cfgPath, 'w'), content)
 		except Exception:
