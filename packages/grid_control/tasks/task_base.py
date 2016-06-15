@@ -17,9 +17,10 @@ from grid_control import utils
 from grid_control.backends import WMS
 from grid_control.config import ConfigError, changeInitNeeded, validNoVar
 from grid_control.gc_plugin import ConfigurablePlugin, NamedPlugin
-from grid_control.parameters import ParameterFactory, ParameterInfo
+from grid_control.parameters import ParameterAdapter, ParameterFactory, ParameterInfo
 from grid_control.utils.file_objects import SafeFile
 from grid_control.utils.gc_itertools import ichain, lchain
+from grid_control.utils.parsing import strGuid
 from hpfwk import AbstractError
 from time import strftime, time
 from python_compat import ifilter, imap, izip, lfilter, lmap, lru_cache, md5_hex
@@ -101,14 +102,14 @@ class TaskModule(NamedPlugin):
 		self.updateErrorDict(utils.pathShare('gc-run.lib'))
 
 		# Init parameter source manager
-		self._pm = config.getPlugin('parameter factory', 'SimpleParameterFactory',
-			cls = ParameterFactory, inherit = True)
-		param_config = config.changeView(viewClass = 'TaggedConfigView', addSections = ['parameters'], addTags = [self])
-		self.setupJobParameters(param_config, self._pm)
-		self.source = self._pm.getSource(param_config)
+		self._setupJobParameters(config)
+		self._pfactory = config.getPlugin('internal parameter factory', 'BasicParameterFactory',
+			cls = ParameterFactory, tags = [self], inherit = True)
+		self.source = config.getPlugin('parameter adapter', 'TrackedParameterAdapter',
+			cls = ParameterAdapter, pargs = (self._pfactory.getSource(),))
 
 
-	def setupJobParameters(self, config, pm):
+	def _setupJobParameters(self, config):
 		pass
 
 
@@ -151,9 +152,8 @@ class TaskModule(NamedPlugin):
 
 
 	def getTransientVars(self):
-		hx = str.join("", imap(lambda x: "%02x" % x, imap(random.randrange, [256]*16)))
 		return {'GC_DATE': strftime("%F"), 'GC_TIMESTAMP': strftime("%s"),
-			'GC_GUID': '%s-%s-%s-%s-%s' % (hx[:8], hx[8:12], hx[12:16], hx[16:20], hx[20:]),
+			'GC_GUID': strGuid(str.join("", imap(lambda x: "%02x" % x, imap(random.randrange, [256]*16)))),
 			'RANDOM': str(random.randrange(0, 900000000))}
 
 
@@ -249,7 +249,7 @@ class TaskModule(NamedPlugin):
 
 
 	def canFinish(self):
-		return True
+		return self.source.canFinish()
 
 
 	def canSubmit(self, jobNum):

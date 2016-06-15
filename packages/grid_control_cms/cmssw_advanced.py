@@ -12,7 +12,7 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-import os
+import os, logging
 from grid_control import utils
 from grid_control.config import ConfigError
 from grid_control.datasets import DataProvider
@@ -21,12 +21,19 @@ from grid_control_cms.cmssw import CMSSW
 from grid_control_cms.lumi_tools import formatLumi, parseLumiFilter, strLumi
 from python_compat import imap, lmap, set, sorted
 
+def formatLumiNice(lumis):
+	lumi_filter_str = formatLumi(lumis)
+	if len(lumi_filter_str) < 5:
+		return str.join(', ', lumi_filter_str)
+	return '%s ... %s (%d entries)' % (lumi_filter_str[0], lumi_filter_str[-1], len(lumi_filter_str))
+
+
 class CMSSW_Advanced(CMSSW):
 	configSections = CMSSW.configSections + ['CMSSW_Advanced']
 
 	def __init__(self, config, name):
 		self._name = name # needed for changeView calls before the constructor
-		head = [(0, 'Nickname')]
+		head = [('DATASETNICK', 'Nickname')]
 
 		# Mapping between nickname and config files:
 		self._nmCfg = config.getLookup('nickname config', {}, defaultMatcher = 'regex',
@@ -65,20 +72,18 @@ class CMSSW_Advanced(CMSSW):
 			nickNames = set()
 			for block in DataProvider.loadFromFile(dsPath).getBlocks():
 				nickNames.add(block[DataProvider.Nickname])
-			utils.vprint('Mapping between nickname and other settings:', -1)
+			log = logging.getLogger('user')
+			log.info('Mapping between nickname and other settings:')
 			report = []
+			(ps_basic, ps_nested) = self._pfactory.getLookupSources()
+			if ps_nested:
+				log.info('This list doesn\'t show "nickname constants" with multiple values!')
 			for nick in sorted(nickNames):
-				lumi_filter_str = formatLumi(self._nmLumi.lookup(nick, '', is_selector = False))
-				if len(lumi_filter_str) > 4:
-					nice_lumi_filter = '%s ... %s (%d entries)' % (lumi_filter_str[0], lumi_filter_str[-1], len(lumi_filter_str))
-				else:
-					nice_lumi_filter = str.join(', ', lumi_filter_str)
-				config_files = self._nmCfg.lookup(nick, '', is_selector = False)
-				tmp = {0: nick, 1: str.join(', ', imap(os.path.basename, config_files)), 2: nice_lumi_filter}
-				lookupvars = {'DATASETNICK': nick}
-				for src in self._pm.lookupSources:
-					src.fillParameterInfo(None, lookupvars)
-				tmp.update(lookupvars)
+				tmp = {'DATASETNICK': nick}
+				for src in ps_basic:
+					src.fillParameterInfo(None, tmp)
+				tmp[1] = str.join(', ', imap(os.path.basename, self._nmCfg.lookup(nick, '', is_selector = False)))
+				tmp[2] = formatLumiNice(self._nmLumi.lookup(nick, '', is_selector = False))
 				report.append(tmp)
 			utils.printTabular(head, report, 'cl')
 

@@ -87,7 +87,7 @@ class InactiveWMS(WMS):
 
 	def __init__(self, config, wmsName):
 		WMS.__init__(self, config, wmsName)
-		self._token = config.getCompositePlugin(['access token', 'proxy'], 'TrivialAccessToken',
+		self._token = config.getCompositePlugin(['proxy', 'access token'], 'TrivialAccessToken',
 			'MultiAccessToken', cls = AccessToken, inherit = True, tags = [self])
 
 	def canSubmit(self, neededTime, canCurrentlySubmit):
@@ -132,7 +132,7 @@ class BasicWMS(WMS):
 		self._failPath = config.getWorkPath('fail')
 
 		# Initialise access token, broker and storage manager
-		self._token = config.getCompositePlugin(['access token', 'proxy'], 'TrivialAccessToken',
+		self._token = config.getCompositePlugin(['proxy', 'access token'], 'TrivialAccessToken',
 			'MultiAccessToken', cls = AccessToken, inherit = True, tags = [self])
 
 		# UI -> SE -> WN

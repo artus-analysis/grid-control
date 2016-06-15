@@ -1,5 +1,5 @@
 #!/bin/bash
-# | Copyright 2009-2011 Karlsruhe Institute of Technology
+# | Copyright 2009-2016 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@ export GC_SANDBOX="$2"
 GC_STDOUT="$3"
 GC_STDERR="$4"
 shift 4
-cd $GC_SANDBOX
+cd "$GC_SANDBOX" || exit 102
 (
-	nice $@
+	nice "$@"
 ) > "$GC_STDOUT" 2> "$GC_STDERR" &
 echo $!

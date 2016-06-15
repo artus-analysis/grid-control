@@ -62,10 +62,11 @@ class GCDumpParameterSource(ParameterSource):
 					activity.finish()
 					activity = utils.ActivityLog('Writing parameter dump [%d/%d]' % (jobNum + 1, maxN))
 					meta = pa.getJobInfo(jobNum)
+					meta_str = str.join('\t', imap(lambda k: json.dumps(meta.get(k, '')), keys))
 					if meta.get(ParameterInfo.ACTIVE, True):
-						fp.write('%d\t%s\n' % (jobNum, str.join('\t', imap(lambda k: json.dumps(meta.get(k, '')), keys))))
+						fp.write('%d\t%s\n' % (jobNum, meta_str))
 					else:
-						fp.write('%d!\t%s\n' % (jobNum, str.join('\t', imap(lambda k: json.dumps(meta.get(k, '')), keys))))
+						fp.write('%d!\t%s\n' % (jobNum, meta_str))
 				activity.finish()
 		finally:
 			fp.close()
@@ -74,10 +75,16 @@ class GCDumpParameterSource(ParameterSource):
 
 # Reader for CSV files
 class CSVParameterSource(InternalParameterSource):
+	alias = ['csv']
+
 	def __init__(self, fn, format = 'sniffed'):
+		(self._fn, self._format) = (fn, format)
 		sniffed = csv.Sniffer().sniff(open(fn).readline())
 		csv.register_dialect('sniffed', sniffed)
 		tmp = list(csv.DictReader(open(fn), dialect = format))
+		for entry in tmp:
+			if None in entry.values():
+				raise Exception('Malformed entry in csv file %r: %r' % (fn, entry))
 
 		def cleanupDict(d):
 			# strip all key value entries
@@ -90,8 +97,10 @@ class CSVParameterSource(InternalParameterSource):
 		values = lmap(lambda d: dict(cleanupDict(d)), tmp)
 		InternalParameterSource.__init__(self, values, keys)
 
+	def __repr__(self):
+		return 'csv(%r, %r)' % (self._fn, self._format)
+
 	def create(cls, pconfig = None, src = 'CSV'): # pylint:disable=arguments-differ
 		fn = pconfig.get(src, 'source')
 		return CSVParameterSource(fn, pconfig.get(src, 'format', 'sniffed'))
 	create = classmethod(create)
-ParameterSource.managerMap['csv'] = 'CSVParameterSource'

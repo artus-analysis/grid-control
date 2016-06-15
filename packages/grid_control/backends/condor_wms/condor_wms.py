@@ -65,10 +65,10 @@ class Condor(BasicWMS):
 		utils.vprint('Using batch system: Condor/GlideInWMS', -1)
 		BasicWMS.__init__(self, config, wmsName)
 		# special debug out/messages/annotations - may have noticeable effect on storage and performance!
-		if config.get('debugLog', ''):
-			self.debug=open(config.get('debugLog', ''),'a')
-		else:
-			self.debug=False
+		debugLogFN = config.get('debugLog', '')
+		self.debug = False
+		if debugLogFN:
+			self.debug = open(debugLogFN, 'a')
 		######
 		self.taskID = config.get('task id', md5(str(time.time())).hexdigest(), persistent = True) # FIXME!
 		self.debugOut("""
@@ -132,9 +132,11 @@ class Condor(BasicWMS):
 				self.debug.write('%s' % message)
 			else:
 				self.debug.write(message)
+
 	def debugPool(self,timestamp=True,newline=True):
 		if self.debug:
 			self.debugOut(self.Pool.LoggedExecute('echo ', "'pool check'" ).cmd, timestamp, newline)
+
 	def debugFlush(self):
 		if self.debug:
 			self.debug.flush()
@@ -653,36 +655,51 @@ class Condor(BasicWMS):
 			elif reqType == WMS.STORAGE:
 				if ("requestSEs" in self.poolReqs):
 					jdlReq.append( self.poolReqs["requestSEs"] + ' = ' + '"' + ','.join(reqValue) + '"' )
-				#append unused requirements to JDL for debugging
 
+			elif reqType == WMS.MEMORY and reqValue > 0:
+					jdlReq.append('request_memory = %dM' % reqValue)
+
+			elif reqType == WMS.CPUS and reqValue > 0:
+					jdlReq.append('request_cpus = %d' % reqValue)
+
+			#append unused requirements to JDL for debugging
 			elif self.debug:
-				self.debugOut("reqType: %s  reqValue: %s"%(reqType,reqValue))
+				self.debugOut("reqType: %s  reqValue: %s" % (reqType,reqValue))
 				self.debugFlush()
 				jdlReq.append('# Unused Requirement:')
 				jdlReq.append('# Type: %s' % reqType )
-				jdlReq.append('# Type: %s' % reqValue )
+				jdlReq.append('# Value: %s' % reqValue )
 
-			#TODO::: GLIDEIN_REQUIRE_GLEXEC_USE, WMS.SOFTWARE, WMS.MEMORY, WMS.CPUS
+			#TODO::: GLIDEIN_REQUIRE_GLEXEC_USE, WMS.SOFTWARE
+
 		# (HPDA) file location service
 		if "dataFiles" in self.poolReqs:
-			# as per ``formatFileList``
-			# UserMod filelists are space separated                              'File1 File2 File3'
-			# CMSSW filelists are individually quoted and comma+space separated  '"File1", "File2", "File3"'
-			file_list = task.getJobConfig(jobNum).get('FILE_NAMES','').strip()
-			if '", "' in file_list: # CMSSW style
-				file_list = file_list.strip('"').split('", "')
-			else: # UserMod style
-				file_list = file_list.split(' ')
-			if file_list:
-				arg_key = self.poolReqs["dataFiles"]
-				data_file = os.path.join(self.getSandboxPath(jobNum), 'job_%d_files.txt' % jobNum)
-				data_file_list = open(data_file,"w")
-				try:
-					data_file_list.writelines(lmap(lambda line: line + "\n", file_list))
-				finally:
-					data_file_list.close()
-				jdlReq.append('%s = "%s"'%(arg_key, data_file))
+			jdlReq.extend(self._getRequirementsFileList(jobNum, task))
 		return jdlReq
+
+	def _getRequirementsFileList(self, jobNum, task):
+		#TODO: Replace with a dedictaed PartitionProcessor to split HDPA file lists.
+		jdlFileList = []
+		# as per ``formatFileList``
+		# UserMod filelists are space separated                              'File1 File2 File3'
+		# CMSSW filelists are individually quoted and comma+space separated  '"File1", "File2", "File3"'
+		file_list = task.getJobConfig(jobNum).get('FILE_NAMES','').strip()
+		if '", "' in file_list:  # CMSSW style
+			file_list = file_list.strip('"').split('", "')
+		else:  # UserMod style
+			file_list = file_list.split(' ')
+
+		if len(file_list) > 1 or len(file_list[0]) > 1:
+			arg_key = self.poolReqs["dataFiles"]
+			data_file = os.path.join(self.getSandboxPath(jobNum),'job_%d_files.txt' % jobNum)
+			data_file_list = open(data_file,"w")
+			try:
+				data_file_list.writelines(lmap(lambda line: line + "\n",file_list))
+			finally:
+				data_file_list.close()
+			jdlFileList.append('%s = "%s"' % (arg_key,data_file))
+
+		return jdlFileList
 
 		##
 		##	Pool access functions
@@ -774,10 +791,11 @@ class Condor(BasicWMS):
 				testProcess.logError(self.errorLog)
 				raise BackendError("Failed to access remote Condor tools! The pool you are submitting to is very likely not configured properly.")
 			# get initial workdir on remote pool
-			if config.get("remote workdir", ''):
-				uName=self.Pool.LoggedExecute("whoami").getOutput().strip()
-				self.poolWorkDir=os.path.join(config.get("remote workdir", ''), uName)
-				pwdProcess=self.Pool.LoggedExecute("mkdir -p %s" % self.poolWorkDir )
+			remote_workdir = config.get("remote workdir", '')
+			if remote_workdir:
+				uName = self.Pool.LoggedExecute("whoami").getOutput().strip()
+				self.poolWorkDir = os.path.join(remote_workdir, uName)
+				pwdProcess = self.Pool.LoggedExecute("mkdir -p %s" % self.poolWorkDir )
 			else:
 				pwdProcess=self.Pool.LoggedExecute("pwd")
 				self.poolWorkDir=pwdProcess.getOutput().strip()
@@ -790,12 +808,12 @@ class Condor(BasicWMS):
 		dest = config.get('remote Dest', '@')
 		user = config.get('remote User', '')
 		splitDest = lmap(str.strip, dest.split('@'))
-		if len(splitDest)==1:
-			return utils.QM(user,user,None),splitDest[0],None
-		elif len(splitDest)==2:
-			return utils.QM(user,user,None),splitDest[0],splitDest[1]
+		if len(splitDest) == 1:
+			return utils.QM(user, user, None), splitDest[0], None
+		elif len(splitDest) == 2:
+			return utils.QM(user, user, None), splitDest[0], splitDest[1]
 		else:
 			self._log.warning('Could not parse Configuration setting "remote Dest"!')
 			self._log.warning('Expected: [<sched>|<sched>@|<sched>@<collector>]')
-			self._log.warning('Found: %s', config.get('remote Dest', '@'))
+			self._log.warning('Found: %s', dest)
 			raise BackendError('Could not parse submit destination')

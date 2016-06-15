@@ -18,11 +18,10 @@ from grid_control import utils
 from grid_control.config.config_entry import ConfigEntry, ConfigError
 from grid_control.utils.data_structures import UniqueList
 from grid_control.utils.file_objects import SafeFile
-from grid_control.utils.gc_itertools import ichain
 from grid_control.utils.parsing import parseList
 from grid_control.utils.thread_tools import TimeoutException, hang_protection
 from hpfwk import AbstractError, Plugin
-from python_compat import identity, imap, irange, ismap, itemgetter, lfilter, lmap, rsplit
+from python_compat import identity, imap, irange, itemgetter, lfilter, lmap, rsplit
 
 # Class to fill config containers with settings
 class ConfigFiller(Plugin):
@@ -50,18 +49,7 @@ class FileConfigFiller(ConfigFiller):
 			searchPaths.extend(self._fillContentWithIncludes(configFile, [os.getcwd()], configContent))
 			# Store config settings
 			for section in configContent:
-				# Allow very basic substitutions with %(option)s syntax
-				def getOptValue(option, value, source):
-					return (option, value)
-				substDict = dict(ichain([
-					ismap(getOptValue, configContent.get('default', [])),
-					ismap(getOptValue, configContent.get(section, []))]))
 				for (option, value, source) in configContent[section]:
-					# Protection for non-interpolation "%" in value
-					try:
-						value = (value.replace('%', '\x01').replace('\x01(', '%(') % substDict).replace('\x01', '%')
-					except Exception:
-						raise ConfigError('Unable to interpolate value %r with %r' % (value, substDict))
 					self._addEntry(container, section, option, value, source)
 		searchString = str.join(' ', UniqueList(searchPaths))
 		if self._addSearchPath:
@@ -173,9 +161,11 @@ class DefaultFilesConfigFiller(FileConfigFiller):
 				return socket.gethostbyaddr(host)[0]
 			except Exception:
 				return host
+		log = logging.getLogger('config.default')
 		try:
 			host = hang_protection(resolve_hostname, timeout = 5)
 			hostCfg = lmap(lambda c: utils.pathPKG('../config/%s.conf' % host.split('.', c)[-1]), irange(host.count('.') + 1, -1, -1))
+			log.log(logging.DEBUG1, 'Possible host config files: %s', str.join(', ', hostCfg))
 		except TimeoutException:
 			sys.stderr.write('System call to resolve hostname is hanging!\n')
 			sys.stderr.flush()
@@ -183,7 +173,6 @@ class DefaultFilesConfigFiller(FileConfigFiller):
 		defaultCfg = ['/etc/grid-control.conf', '~/.grid-control.conf', utils.pathPKG('../config/default.conf')]
 		if os.environ.get('GC_CONFIG'):
 			defaultCfg.append('$GC_CONFIG')
-		log = logging.getLogger('config.default')
 		log.log(logging.DEBUG1, 'Possible default config files: %s', str.join(', ', defaultCfg))
 		fqConfigFiles = lmap(lambda p: utils.resolvePath(p, mustExist = False), hostCfg + defaultCfg)
 		FileConfigFiller.__init__(self, lfilter(os.path.exists, fqConfigFiles), addSearchPath = False)

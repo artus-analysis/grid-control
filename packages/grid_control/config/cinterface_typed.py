@@ -31,6 +31,10 @@ class TypedConfigInterface(ConfigInterface):
 	def setInt(self, option, value, opttype = '=', source = None):
 		return self._setInternal('int', int.__str__, option, value, opttype, source)
 
+	# Handling floating point config options - using strict float (de-)serialization
+	def getFloat(self, option, default = noDefault, **kwargs):
+		return self._getInternal('float', float.__str__, float, None, option, default, **kwargs)
+
 	# Handling boolean config options - feature: true and false are not the only valid expressions
 	def getBool(self, option, default = noDefault, **kwargs):
 		def str2obj(value):
@@ -170,7 +174,7 @@ class SimpleConfigInterface(TypedConfigInterface):
 		matcherObj = self.getPlugin(matcherOpt, defaultMatcher, cls = Matcher, pargs = (matcherOpt,))
 		filterExpr = self.get(option, default, str2obj = filterParser, obj2str = filterStr, **kwargs)
 		filterOrder = self.getEnum(appendOption(option, 'order'), ListOrder, defaultOrder)
-		return self.getPlugin(appendOption(option, 'filter'), defaultFilter, cls = ListFilter,
+		return self.getPlugin(appendOption(option, 'plugin'), defaultFilter, cls = ListFilter,
 			pargs = (filterExpr, matcherObj, filterOrder, matchKey, negate))
 
 	# Get state - bool stored in hidden "state" section - any given detail overrides global state

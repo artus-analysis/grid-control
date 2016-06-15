@@ -13,20 +13,14 @@
 # | limitations under the License.
 
 import logging
-from grid_control.parameters.pfactory_base import BasicParameterFactory
+from grid_control.parameters.pfactory_base import UserParameterFactory
 from grid_control.parameters.psource_base import ParameterError, ParameterSource
-from grid_control.parameters.psource_meta import ZipLongParameterSource
 
 # Parameter factory which evaluates a parameter module string
-class ModularParameterFactory(BasicParameterFactory):
-	def __init__(self, config, name):
-		BasicParameterFactory.__init__(self, config, name)
-		self._pExpr = self._paramConfig.get('parameters', '')
+class ModularParameterFactory(UserParameterFactory):
+	alias = ['modular']
 
-
-	def _getUserSource(self, pExpr, parent):
-		if not pExpr:
-			return parent
+	def _getUserSource(self, pExpr):
 		# Wrap psource factory functions
 		def createWrapper(clsName):
 			def wrapper(*args):
@@ -40,15 +34,12 @@ class ModularParameterFactory(BasicParameterFactory):
 					raise ParameterError('Error while creating "%r" with arguments "%r"' % (parameterClass.__name__, args))
 			return wrapper
 		userFun = {}
-		for (key, cls) in ParameterSource.managerMap.items():
-			userFun[key] = createWrapper(cls)
+		for clsInfo in ParameterSource.getClassList():
+			for clsName in clsInfo.keys():
+				if clsName != clsInfo[clsName] and (clsName != 'depth'):
+					userFun[clsName] = createWrapper(clsInfo[clsName])
 		try:
-			source = eval(pExpr, userFun) # pylint:disable=eval-used
+			return eval(pExpr, userFun) # pylint:disable=eval-used
 		except Exception:
 			logging.getLogger('user').warning('Available functions: %s', userFun.keys())
 			raise
-		return ZipLongParameterSource(parent, source)
-
-
-	def _getRawSource(self, parent):
-		return BasicParameterFactory._getRawSource(self, self._getUserSource(self._pExpr, parent))

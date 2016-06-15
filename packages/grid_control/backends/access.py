@@ -90,9 +90,9 @@ class TimedAccessToken(AccessToken):
 	def __init__(self, config, name):
 		AccessToken.__init__(self, config, name)
 		self._lowerLimit = config.getTime('min lifetime', 300, onChange = None)
-		self._maxQueryTime = config.getTime('max query time',  5 * 60, onChange = None)
-		self._minQueryTime = config.getTime('min query time', 30 * 60, onChange = None)
-		self._ignoreTime = config.getBool('ignore walltime', False, onChange = None)
+		self._maxQueryTime = config.getTime(['max query time', 'urgent query time'],  5 * 60, onChange = None)
+		self._minQueryTime = config.getTime(['min query time', 'query time'], 30 * 60, onChange = None)
+		self._ignoreTime = config.getBool(['ignore walltime', 'ignore needed time'], False, onChange = None)
 		self._lastUpdate = 0
 		self._logUser = logging.getLogger('user.time')
 
@@ -100,7 +100,7 @@ class TimedAccessToken(AccessToken):
 		if not self._checkTimeleft(self._lowerLimit):
 			raise UserError('Your access token (%s) only has %d seconds left! (Required are %s)' %
 				(self.getObjectName(), self._getTimeleft(cached = True), strTime(self._lowerLimit)))
-		if self._ignoreTime:
+		if self._ignoreTime or (neededTime < 0):
 			return True
 		if not self._checkTimeleft(self._lowerLimit + neededTime) and canCurrentlySubmit:
 			self._logUser.warning('Access token (%s) lifetime (%s) does not meet the access and walltime (%s) requirements!',

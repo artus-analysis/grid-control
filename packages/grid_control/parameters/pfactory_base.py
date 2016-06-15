@@ -12,62 +12,84 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-import random
-from grid_control.gc_plugin import NamedPlugin
+import random, logging
+from grid_control.gc_plugin import ConfigurablePlugin
 from grid_control.parameters.config_param import ParameterConfig
-from grid_control.parameters.padapter import ParameterAdapter
-from grid_control.parameters.psource_base import ParameterSource
+from grid_control.parameters.psource_base import NullParameterSource, ParameterError, ParameterSource
 from grid_control.parameters.psource_lookup import createLookupHelper
-from hpfwk import Plugin
+from hpfwk import AbstractError, Plugin
 from python_compat import identity, ifilter, imap, irange, lfilter, lmap
 
-class ParameterFactory(NamedPlugin):
-	configSections = NamedPlugin.configSections + ['parameters']
+class ParameterFactory(ConfigurablePlugin):
 	tagName = 'parameters'
 
-	def __init__(self, config, name):
-		NamedPlugin.__init__(self, config, name)
-		self.adapter = config.get('parameter adapter', 'TrackedParameterAdapter')
-		self._paramConfig = ParameterConfig(config.changeView(setSections = ['parameters']), self.adapter != 'TrackedParameterAdapter')
+	def getSource(self):
+		raise AbstractError
 
 
-	def _getRawSource(self, parent):
-		return parent
+class UserParameterFactory(ParameterFactory):
+	def __init__(self, config):
+		ParameterFactory.__init__(self, config)
+		self._log = logging.getLogger('parameterfactory')
+		self._paramConfig = ParameterConfig(config)
+		self._pExpr = config.get('parameters', '', onChange = None)
 
+	def _getUserSource(self, pExpr):
+		raise AbstractError
 
-	def getSource(self, config):
-		DataParameterSource = Plugin.getClass('DataParameterSource')
-		source = self._getRawSource(ParameterSource.createInstance('RNGParameterSource'))
-		if DataParameterSource.datasetsAvailable and not DataParameterSource.datasetsUsed:
-			source = ParameterSource.createInstance('CrossParameterSource', DataParameterSource.create(), source)
-		return ParameterAdapter.createInstance(self.adapter, config, source)
+	def getSource(self):
+		if not self._pExpr:
+			return NullParameterSource()
+		self._log.debug('Parsing parameter expression: %s', repr(self._pExpr))
+		try:
+			source = self._getUserSource(self._pExpr)
+		except:
+			raise ParameterError('Unable to parse parameter expression %r' % self._pExpr)
+		self._log.debug('Parsed parameter source: %s', repr(source))
+		return source
 
 
 class BasicParameterFactory(ParameterFactory):
-	def __init__(self, config, name):
-		(self.constSources, self.lookupSources, self.elevateSources) = ([], [], [])
-		ParameterFactory.__init__(self, config, name)
+	def __init__(self, config):
+		ParameterFactory.__init__(self, config)
+		(self._constSources, self._lookupSources, self._nestedSources) = ([], [], [])
 
-		# Get constants from [constants <tags...>]
-		constants_config = config.changeView(viewClass = 'TaggedConfigView',
-			setClasses = None, setSections = ['constants'], addTags = [self])
-		constants_pconfig = ParameterConfig(constants_config, self.adapter != 'TrackedParameterAdapter')
-		for cName in ifilter(lambda o: not o.endswith(' lookup'), constants_config.getOptions()):
-			constants_config.set('%s type' % cName, 'verbatim', '?=')
-			self._registerPSource(constants_pconfig, cName.upper())
-		# Get constants from [<Module>] constants
-		task_pconfig = ParameterConfig(config, self.adapter != 'TrackedParameterAdapter')
-		for cName in config.getList('constants', []):
-			config.set('%s type' % cName, 'verbatim', '?=')
-			self._registerPSource(task_pconfig, cName)
 		# Random number variables
 		jobs_config = config.changeView(addSections = ['jobs'])
+		for name in jobs_config.getList('random variables', ['JOB_RANDOM'], onChange = None):
+			self._constSources.append(ParameterSource.createInstance('RNGParameterSource', name))
 		nseeds = jobs_config.getInt('nseeds', 10)
 		newSeeds = lmap(lambda x: str(random.randint(0, 10000000)), irange(nseeds))
 		for (idx, seed) in enumerate(jobs_config.getList('seeds', newSeeds, persistent = True)):
 			ps = ParameterSource.createInstance('CounterParameterSource', 'SEED_%d' % idx, int(seed))
-			self.constSources.append(ps)
-		self.repeat = config.getInt('repeat', 1, onChange = None) # ALL config.x -> paramconfig.x !
+			self._constSources.append(ps)
+
+		# Get constants from [constants <tags...>]
+		constants_config = config.changeView(viewClass = 'TaggedConfigView',
+			setClasses = None, setSections = ['constants'], setNames = None)
+		constants_pconfig = ParameterConfig(constants_config)
+		for cName in ifilter(lambda o: not o.endswith(' lookup'), constants_config.getOptions()):
+			constants_config.set('%s type' % cName, 'verbatim', '?=')
+			self._registerPSource(constants_pconfig, cName.upper())
+
+		param_config = config.changeView(viewClass = 'TaggedConfigView',
+			setClasses = None, addSections = ['parameters'], inheritSections = True)
+
+		# Get constants from [<Module>] constants
+		task_pconfig = ParameterConfig(param_config)
+		for cName in param_config.getList('constants', []):
+			config.set('%s type' % cName, 'verbatim', '?=')
+			self._registerPSource(task_pconfig, cName)
+
+		# Get global repeat value from 'parameters' section
+		self._repeat = param_config.getInt('repeat', 1, onChange = None)
+		self._req = param_config.getBool('translate requirements', True, onChange = None)
+		self._pfactory = param_config.getPlugin('parameter factory', 'SimpleParameterFactory',
+			cls = ParameterFactory)
+
+
+	def getLookupSources(self): # HACK: For CMSSW_Advanced variable display
+		return (list(self._lookupSources), list(self._nestedSources))
 
 
 	def _registerPSource(self, pconfig, varName):
@@ -79,25 +101,31 @@ class BasicParameterFactory(ParameterFactory):
 		lookup_list = lfilter(identity, str.join('', imap(replace_nonalnum, lookup_str)).split())
 		for (doElevate, PSourceClass, args) in createLookupHelper(pconfig, [varName], lookup_list):
 			if doElevate: # switch needs elevation beyond local scope
-				self.elevateSources.append((PSourceClass, args))
+				self._nestedSources.append((PSourceClass, args))
 			else:
 				ps = PSourceClass(*args)
 				if ps.depends():
-					self.lookupSources.append(ps)
+					self._lookupSources.append(ps)
 				else:
-					self.constSources.append(ps)
+					self._constSources.append(ps)
 
 
-	def _getRawSource(self, parent):
-		req_source = ParameterSource.createInstance('RequirementParameterSource')
-		source_list = self.constSources + [parent] + self.lookupSources
-		if not self.elevateSources:
-			source_list.append(req_source)
+	def _useAvailableDataSource(self, source):
+		DataParameterSource = Plugin.getClass('DataParameterSource')
+		if DataParameterSource.datasetsAvailable and not DataParameterSource.datasetsUsed:
+			if source is not None:
+				return ParameterSource.createInstance('CrossParameterSource', DataParameterSource.create(), source)
+			return DataParameterSource.create()
+		return source
+
+
+	def getSource(self):
+		source_list = self._constSources + [self._pfactory.getSource()] + self._lookupSources
 		source = ParameterSource.createInstance('ZipLongParameterSource', *source_list)
-		for (PSourceClass, args) in self.elevateSources:
+		for (PSourceClass, args) in self._nestedSources:
 			source = PSourceClass(source, *args)
-		if self.elevateSources:
+		if self._req:
+			req_source = ParameterSource.createInstance('RequirementParameterSource')
 			source = ParameterSource.createInstance('ZipLongParameterSource', source, req_source)
-		if self.repeat > 1:
-			source = ParameterSource.createInstance('RepeatParameterSource', source, self.repeat)
-		return ParameterFactory._getRawSource(self, source)
+		source = self._useAvailableDataSource(source)
+		return ParameterSource.createInstance('RepeatParameterSource', source, self._repeat)

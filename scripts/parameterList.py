@@ -16,8 +16,8 @@
 import os, sys, random
 from gcSupport import Options, getConfig, scriptOptions, utils
 from grid_control.datasets import DataSplitter
-from grid_control.parameters import ParameterInfo, ParameterMetadata, ParameterSource
-from python_compat import ifilter, imap, irange, izip, lfilter, lmap, md5_hex, set, sorted
+from grid_control.parameters import ParameterAdapter, ParameterInfo, ParameterMetadata, ParameterSource
+from python_compat import ifilter, imap, izip, lfilter, lmap, md5_hex, set, sorted
 
 random.seed(0)
 
@@ -29,13 +29,12 @@ parser.addBool(None, 'f', 'force-intervention', default = False, help = 'Simulat
 parser.addBool(None, 'I', 'intervention',       default = False, help = 'Display intervention tasks')
 parser.addBool(None, 'l', 'list-parameters',    default = False, help = 'Display parameter list')
 parser.addBool(None, 'L', 'show-sources',       default = False, help = 'Show parameter sources')
-parser.addBool(None, 's', 'static',             default = False, help = 'Assume a static parameterset')
 parser.addBool(None, 't', 'untracked',          default = False, help = 'Display untracked variables')
 parser.addBool(None, 'T', 'persistent',         default = False, help = 'Work with persistent paramters')
 parser.addList(None, 'p', 'parameter',          default = [],    help = 'Specify parameters')
 parser.addText(None, 'D', 'dataset',            default = '',    help = 'Add dataset splitting (use "True" to simulate a dataset)')
 parser.addText(None, 'j', 'job',                default = None,  help = 'Select job to display (used for unbounded parameter spaces)')
-parser.addText(None, 'M', 'manager',            default = None,  help = 'Select parameter source manager')
+parser.addText(None, 'F', 'factory',            default = None,  help = 'Select parameter source factory')
 parser.addText(None, 'o', 'output',             default = '',    help = 'Show only specified parameters')
 parser.addText(None, 'S', 'save',               default = '',    help = 'Saves information to specified file')
 parser.addText(None, 'V', 'visible',            default = '',    help = 'Set visible variables')
@@ -118,8 +117,6 @@ def setup_config(opts, args):
 		configParameters.set('parameters', str.join(' ', args).replace('\\n', '\n'))
 		if opts.dataset:
 			configParameters.set('default lookup', 'DATASETNICK')
-		if not opts.persistent:
-			configParameters.set('parameter adapter', 'BasicParameterAdapter', '=')
 		if utils.verbosity() > 2:
 			config.changeView(setSections = None).write(sys.stdout)
 	return config
@@ -142,24 +139,28 @@ def setup_dataset(config, dataset):
 # Initialize ParameterFactory and ParameterSource
 def get_psource(opts, args):
 	config = setup_config(opts, args)
-	pm = config.getPlugin('parameter factory', 'SimpleParameterFactory', cls = 'ParameterFactory')
+	if opts.factory:
+		config.set('parameter factory', opts.factory)
+	pm = config.getPlugin('internal parameter factory', 'BasicParameterFactory', cls = 'ParameterFactory')
 	if opts.dataset:
 		setup_dataset(config, opts.dataset)
-	return pm.getSource(config)
+	adapter = 'BasicParameterAdapter'
+	if opts.persistent:
+		adapter = 'TrackedParameterAdapter'
+	return ParameterAdapter.createInstance(adapter, config, pm.getSource())
 
 def get_parameters(opts, psource):
 	result = []
 	needGCParam = False
 	if psource.getMaxJobs() is not None:
 		countActive = 0
-		for jobNum in irange(psource.getMaxJobs()):
-			info = psource.getJobInfo(jobNum)
+		for info in psource.iterJobs():
 			if info[ParameterInfo.ACTIVE]:
 				countActive += 1
 			if opts.disabled or info[ParameterInfo.ACTIVE]:
 				if not info[ParameterInfo.ACTIVE]:
 					info['GC_PARAM'] = 'N/A'
-				if str(info['GC_PARAM']) != str(jobNum):
+				if str(info['GC_PARAM']) != str(info['GC_JOB_ID']):
 					needGCParam = True
 				result.append(info)
 		if opts.parseable:
@@ -201,7 +202,7 @@ def list_parameters(opts, psource):
 			nickname = None
 			if ('DATASETNICK' in pset) and (opts.collapse == 2):
 				nickname = pset.pop('DATASETNICK')
-			h = md5_hex(repr(lmap(pset.get, stored)))
+			h = md5_hex(repr(lmap(lambda key: pset.get(str(key)), stored)))
 			result.setdefault(h, []).append(pset)
 			result_nicks.setdefault(h, set()).add(nickname)
 
