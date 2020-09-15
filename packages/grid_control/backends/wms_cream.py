@@ -1,4 +1,4 @@
-# | Copyright 2016 Karlsruhe Institute of Technology
+# | Copyright 2016-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,197 +12,323 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-import os, re, tempfile
-from grid_control import utils
+import os, re, time, tempfile
+import threading
+from datetime import datetime, timedelta
+from grid_control.backends.aspect_cancel import CancelAndPurgeJobs, CancelJobsWithProcessBlind
+from grid_control.backends.aspect_status import CheckInfo, CheckJobsWithProcess
+from grid_control.backends.backend_tools import ChunkedExecutor, ProcessCreatorAppendArguments, unpack_wildcard_tar  # pylint:disable=line-too-long
 from grid_control.backends.wms import BackendError
 from grid_control.backends.wms_grid import GridWMS
 from grid_control.job_db import Job
-from python_compat import imap, irange, md5, tarfile
+from grid_control.utils import ensure_dir_exists, remove_files, resolve_install_path
+from grid_control.utils.activity import Activity
+from grid_control.utils.process_base import LocalProcess
+from hpfwk import clear_current_exception
+from python_compat import imap, irange, md5_hex
+
+
+class CREAMCancelJobs(CancelJobsWithProcessBlind):
+	def __init__(self, config):
+		CancelJobsWithProcessBlind.__init__(self, config,
+			'glite-ce-job-cancel', ['--noint', '--logfile', '/dev/stderr'])
+
+
+class CREAMPurgeJobs(CancelJobsWithProcessBlind):
+	def __init__(self, config):
+		CancelJobsWithProcessBlind.__init__(self, config,
+			'glite-ce-job-purge', ['--noint', '--logfile', '/dev/stderr'])
+
+
+class CREAMCheckJobs(CheckJobsWithProcess):
+	def __init__(self, config):
+		proc_factory = ProcessCreatorAppendArguments(config,
+			'glite-ce-job-status', ['--level', '0', '--logfile', '/dev/stderr'])
+		CheckJobsWithProcess.__init__(self, config, proc_factory, status_map={
+			Job.ABORTED: ['ABORTED', 'CANCELLED'],
+			Job.DONE: ['DONE-FAILED', 'DONE-OK'],
+			Job.QUEUED: ['IDLE', 'REGISTERED'],
+			Job.RUNNING: ['REALLY-RUNNING', 'RUNNING'],
+			Job.UNKNOWN: ['UNKNOWN'],
+			Job.WAITING: ['HELD', 'PENDING'],
+		})
+
+	def _parse(self, proc):
+		job_info = {}
+		for line in proc.stdout.iter(self._timeout):
+			line = line.lstrip('*').strip()
+			try:
+				(key, value) = imap(str.strip, line.split('=', 1))
+			except Exception:
+				clear_current_exception()
+				continue
+			key = key.lower()
+			value = value[1:-1]
+			if key == 'jobid':
+				yield job_info
+				job_info = {CheckInfo.WMSID: value}
+			elif key == 'status':
+				job_info[CheckInfo.RAW_STATUS] = value
+			elif value:
+				job_info[key] = value
+		yield job_info
+
 
 class CreamWMS(GridWMS):
-	alias = ['cream']
+	alias_list = ['cream']
 
-	_statusMap = {
-		'REGISTERED':     Job.QUEUED,
-		'CANCELLED':      Job.ABORTED,
-		'PENDING':        Job.WAITING,
-		'RUNNING':        Job.RUNNING,
-		'DONE-FAILED':    Job.ABORTED,
-		'DONE-OK':        Job.DONE,
-		'IDLE':           Job.QUEUED,
-		'REALLY-RUNNING': Job.RUNNING,
-	}
-	
 	def __init__(self, config, name):
-		GridWMS.__init__(self, config, name)
-		
-		self._nJobsPerChunk = config.getInt('job chunk size', 10, onChange = None)
+		cancel_executor = CancelAndPurgeJobs(config, CREAMCancelJobs(config), CREAMPurgeJobs(config))
+		GridWMS.__init__(self, config, name,
+			submit_exec=resolve_install_path('glite-ce-job-submit'),
+			output_exec=resolve_install_path('glite-ce-job-output'),
+			check_executor=CREAMCheckJobs(config),
+			cancel_executor=ChunkedExecutor(config, 'cancel', cancel_executor))
 
-		self._submitExec = utils.resolveInstallPath('glite-ce-job-submit')
-		self._statusExec = utils.resolveInstallPath('glite-ce-job-status')
-		self._outputExec = utils.resolveInstallPath('glite-ce-job-output')
-		self._cancelExec = utils.resolveInstallPath('glite-ce-job-cancel')
-		self._purgeExec = utils.resolveInstallPath('glite-ce-job-purge')
-		self._submitParams.update({'-r': self._ce, '--config-vo': self._configVO })
+		self._log.info("CreamWMS.__init__")
+		self._delegate_exec = resolve_install_path('glite-ce-delegate-proxy')
+		self._use_delegate = config.get_bool('try delegate', True, on_change=None)
+		self._chunk_size = config.get_int('job chunk size', 10, on_change=None)
+		self._submit_args_dict.update({'-r': self._ce, '--config-vo': self._config_fn})
+		self._output_regex = r'.*For JobID \[(?P<rawId>\S+)\] output will be stored' + \
+			' in the dir (?P<output_dn>.*)$'
 
-		lvl0_status_ok = r'.*JobID=\[(?P<rawId>\S+)\]\s+Status\s+=\s+\[(?P<status>\S+)\].*'
-		lvl0_status_err = r'.*JobID=\[(?P<rawId>\S+)\]\s+For this job CREAM has returned a fault: MethodName=\[(?P<methodName>.*)\] '
-		lvl0_status_err += r'Timestamp=\[(?P<timestamp>.*)\] ErrorCode=\[(?P<errorCode>.*)\] '
-		lvl0_status_err += r'Description=\[(?P<description>.*)\] FaultCause=\[(?P<faultCause>.*)\].*'
-		self._statusRegexLevel0 = [lvl0_status_ok, lvl0_status_err]
-		self._outputRegex = r'.*For JobID \[(?P<rawId>\S+)\] output will be stored in the dir (?P<outputDir>.*)$'
-		
-		self._useDelegate = False
-		if self._useDelegate is False:
-			self._submitParams.update({ '-a': ' ' })
-	
-	def makeJDL(self, jobNum, module):
-		return ['[\n'] + GridWMS.makeJDL(self, jobNum, module) + ['OutputSandboxBaseDestUri = "gsiftp://localhost";\n]']
-	
-	# Check status of jobs and yield (jobNum, wmsID, status, other data)
-	def checkJobs(self, ids):
-		if len(ids) == 0:
-			raise StopIteration
+		self._end_of_proxy_lifetime = None
+		self._set_proxy_lifetime()
+		#if self._use_delegate is False:
+		#	self._submit_args_dict['-a'] = ' '
 
-		jobNumMap = dict(ids)
-		jobs = ' '.join(self._getRawIDs(ids))
+		self._lock_filename = os.path.join(os.path.expanduser("~"), ".gcFileLock")
+		self._delegated_proxy_filename = None
+		self._delegated_proxy_lock = os.path.join(os.path.expanduser("~"), ".gcDelegatedProxyLock")
+
+	def get_jobs_output_chunk(self, tmp_dn, gc_id_jobnum_list, wms_id_list_done):
+		map_gc_id2jobnum = dict(gc_id_jobnum_list)
+		jobs = list(self._iter_wms_ids(gc_id_jobnum_list))
 		log = tempfile.mktemp('.log')
+		proc = LocalProcess(self._output_exec, '--noint', '--logfile', log, '--dir', tmp_dn, *jobs)
+		exit_code = proc.status(timeout=20 * len(jobs), terminate=True)
 
-		activity = utils.ActivityLog('checking job status')
-		proc = utils.LoggedProcess(self._statusExec, '--level 0 --logfile "%s" %s' % (log, jobs))
-		for jobOutput in proc.getOutput().split('******')[1:]:
-			data = {}
-			for statusRegexLevel0 in self._statusRegexLevel0:
-				match = re.match(statusRegexLevel0, jobOutput.replace('\n', ' '))
-				if match:
-					data = match.groupdict()
-					break
-			data['id'] = self._createId(data['rawId'])
-			yield (jobNumMap.get(data['id']), data['id'], self._statusMap[data.get('status', 'DONE-FAILED')], data)
-		
-		retCode = proc.wait()
-		del activity
+		# yield output dirs
+		current_jobnum = None
+		for line in imap(str.strip, proc.stdout.iter(timeout=20)):
+			match = re.match(self._output_regex, line)
+			if match:
+				wms_id = match.groupdict()['rawId']
+				current_jobnum = map_gc_id2jobnum.get(self._create_gc_id(wms_id))
+				wms_id_list_done.append(wms_id)
+				yield (current_jobnum, match.groupdict()['output_dn'])
+				current_jobnum = None
 
-		if retCode != 0:
-			if self.explainError(proc, retCode):
-				pass
+		if exit_code != 0:
+			if 'Keyboard interrupt raised by user' in proc.stdout.read_log():
+				remove_files([log, tmp_dn])
+				raise StopIteration
 			else:
-				proc.logError(self.errorLog, log = log, jobs = jobs)
-		
-		utils.removeFiles([log])
+				self._log.log_process(proc)
+			self._log.error('Trying to recover from error ...')
+			for dn in os.listdir(tmp_dn):
+				yield (None, os.path.join(tmp_dn, dn))
+		remove_files([log])
 
-	# Get output of jobs and yield output dirs
-	def _getJobsOutput(self, allIds):
-		if len(allIds) == 0:
+	@staticmethod
+	def delfile(filename, sleeptime=100, log=None):
+		# activity = Activity("Releasing lock in %d" % sleeptime)
+		import os
+		time.sleep(sleeptime)
+		try:
+			os.remove(filename)
+		except:
+			if os.path.isfile(filename):
+				if log is not None:
+					log.error("Couldn't releasing lock...")
+				else:
+					print "Couldn't releasing lock..."
+				exit(1)
+			else:
+				if log is not None:
+					log.warning("Couldn't releasing lock...")
+				else:
+					print "Couldn't releasing lock..."
+				# activity = Activity("Lock not found")
+		# activity.finish()
+
+	def submit_jobs(self, jobnum_list, task):
+		import os
+
+		activity = Activity("Waiting for lock to be released...")
+		while os.path.isfile(self._lock_filename):
+			time.sleep(2)
+		file = open(self._lock_filename, "w+")
+		activity.finish()
+		activity = Activity("Lock acquired:" + self._lock_filename)
+		activity.finish()
+
+		t = self._begin_bulk_submission()
+		while not t:
+			activity = Activity('waiting before trying to delegate proxy again...')
+			time.sleep(900)
+			activity.finish()
+			activity = Activity('re-attempting to delegate proxy...')
+			t = self._begin_bulk_submission()
+			activity.finish()
+		'''
+		if not self._begin_bulk_submission():  # Trying to delegate proxy failed
+			self._log.error('Unable to delegate proxy! Continue with automatic delegation...')
+			self._submit_args_dict.update({'-a': ' '})
+			self._use_delegate = False
+		'''
+
+		count_submitted = 0
+		for result in GridWMS.submit_jobs(self, jobnum_list, task):
+			count_submitted += 1
+			yield result
+		file.close()
+		self._log.info('count_submitted: %d' % count_submitted)
+		count_submitted = int(count_submitted * 0.2)
+
+		x = threading.Thread(target=self.delfile, args=(self._lock_filename, count_submitted, self._log))
+		x.start()
+
+	def _set_proxy_lifetime(self):
+		activity = Activity('Get proxy lifetime...')
+		proc = LocalProcess(resolve_install_path('voms-proxy-info'))
+		output = proc.get_output(timeout=10, raise_errors=False)
+		end_of_proxy = 0
+		proxy_key = None
+		for l in output.split('\n'):
+			if 'subject' in l:
+				proxy_key = l.encode("hex")[-15:]
+			if 'timeleft' in l:
+				h, m, s = int(l.split(':')[-3]), int(l.split(':')[-2]), int(l.split(':')[-1])
+				end_of_proxy = time.time() + h * 60 * 60 + m * 60 + s
+				break
+		if end_of_proxy == 0:
+			self._log.warning('couldnt evaluate end of proxy. Output was:')
+			self._log.warning(output)
+			time.sleep(300)
+			self._set_proxy_lifetime()
+		else:
+			self._end_of_proxy_lifetime = end_of_proxy
+			if proxy_key is not None:
+				self._delegated_proxy_filename = os.path.join(os.path.expanduser("~"), ".gcDelegatedProxy" + proxy_key)
+			left_time_str = datetime.fromtimestamp(self._end_of_proxy_lifetime).strftime("%A, %B %d, %Y %I:%M:%S")
+			self._log.info('End of current proxy lifetime: %s' % left_time_str)
+			activity.finish()
+		return 0
+
+	def _begin_bulk_submission(self):
+		self._set_proxy_lifetime()
+		if self._end_of_proxy_lifetime is None:
+			raise Exception("_end_of_proxy_lifetime is not set")
+
+		if self._delegated_proxy_filename is None:
+			raise Exception("_delegated_proxy_filename is not set")
+
+		if self._end_of_proxy_lifetime <= time.time():
+			self._log.info("renew proxy is necessary: %s <= %s" % (str(self._end_of_proxy_lifetime), str(time.time())))
+			x = threading.Thread(target=CreamWMS.delfile, args=(self._lock_filename, 0, self._log))
+			x.start()
+			y = threading.Thread(target=CreamWMS.delfile, args=(self._delegated_proxy_filename, 0, self._log))
+			y.start()
+			raise Exception("renew proxy is necessary")
+
+		elif '-D' in self._submit_args_dict.keys() and self._submit_args_dict['-D'] is not None:
+			try:
+				left_time_str = timedelta(seconds=self._end_of_proxy_lifetime - time.time())
+			except:
+				left_time_str = str(self._end_of_proxy_lifetime - time.time()) + ' sec.'
+			self._log.info("Proxy delegation IS NOT ISSUED since expected to be OK. left: %s " % left_time_str)
+
+		else:
+			if os.path.isfile(self._delegated_proxy_filename):
+				file = open(self._delegated_proxy_filename, "r")
+				delegate_id = file.read()
+				file.close()
+				# file is empty -> another process edditing it?
+				# if delegate_id is None or delegate_id == '': return False
+				if delegate_id is not None and delegate_id != "":
+					self._submit_args_dict.update({'-D': delegate_id})
+				self._log.info('Proxy delegation read from a file: %s ' % (delegate_id))
+
+			elif not os.path.isfile(self._delegated_proxy_lock): #not os.path.isfile(self._delegated_proxy_filename):
+				file_lock = open(self._delegated_proxy_lock, "w+")
+				file = open(self._delegated_proxy_filename, "w+")
+
+				activity = Activity('Delegating proxy for job submission')
+				self._submit_args_dict.update({'-D': None})
+				#if self._use_delegate is False:
+				#	self._submit_args_dict.update({'-a': ' '})
+				#	return True
+				t = time.time()
+				thehex = md5_hex(str(t))
+				self._log.info('Proxy delegation full hex: %s at time %s' % (thehex, str(t)))
+				delegate_id = 'GCD' + thehex[:15]
+				delegate_arg_list = ['-e', self._ce[:self._ce.rfind("/")]]
+				if self._config_fn:
+					delegate_arg_list.extend(['--config', self._config_fn])
+				proc = LocalProcess(self._delegate_exec, '-d', delegate_id,
+					'--logfile', '/dev/stderr', *delegate_arg_list)
+				output = proc.get_output(timeout=10, raise_errors=False)
+				if ('succesfully delegated to endpoint' in output) and (delegate_id in output):
+					self._submit_args_dict.update({'-D': delegate_id})
+				activity.finish()
+
+				if proc.status(timeout=0, terminate=True) != 0:
+					self._log.log_process(proc)
+
+				file.write(delegate_id)
+				file.close()
+				file_lock.close()
+				y = threading.Thread(target=CreamWMS.delfile, args=(self._delegated_proxy_lock, 0, self._log))
+				y.start()
+
+		return self._submit_args_dict.get('-D') is not None
+
+	def _get_jobs_output(self, gc_id_jobnum_list):
+		# Get output of jobs and yield output dirs
+		if len(gc_id_jobnum_list) == 0:
 			raise StopIteration
 
-		basePath = os.path.join(self._outputPath, 'tmp')
+		tmp_dn = os.path.join(self._path_output, 'tmp')
 		try:
-			if len(allIds) == 1:
+			if len(gc_id_jobnum_list) == 1:
 				# For single jobs create single subdir
-				basePath = os.path.join(basePath, md5(allIds[0][0]).hexdigest())
-			utils.ensureDirExists(basePath)
+				tmp_dn = os.path.join(tmp_dn, md5_hex(gc_id_jobnum_list[0][0]))
+			ensure_dir_exists(tmp_dn)
 		except Exception:
-			raise BackendError('Temporary path "%s" could not be created.' % basePath, BackendError)
-		
-		activity = utils.ActivityLog('retrieving job outputs')
-		for ids in imap(lambda x: allIds[x:x+self._nJobsPerChunk], irange(0, len(allIds), self._nJobsPerChunk)):
-			jobNumMap = dict(ids)
-			jobs = ' '.join(self._getRawIDs(ids))
-			log = tempfile.mktemp('.log')
+			raise BackendError('Temporary path "%s" could not be created.' % tmp_dn, BackendError)
 
-			#print self._outputExec, '--noint --logfile "%s" --dir "%s" %s' % (log, basePath, jobs)
-			#import sys
-			#sys.exit(1)
-			proc = utils.LoggedProcess(self._outputExec,
-				'--noint --logfile "%s" --dir "%s" %s' % (log, basePath, jobs))
-
-			# yield output dirs
-			todo = jobNumMap.values()
-			done = []
-			currentJobNum = None
-			for line in imap(str.strip, proc.iter()):
-				match = re.match(self._outputRegex, line)
-				if match:
-					currentJobNum = jobNumMap.get(self._createId(match.groupdict()['rawId']))
-					todo.remove(currentJobNum)
-					done.append(match.groupdict()['rawId'])
-					outputDir = match.groupdict()['outputDir']
-					if os.path.exists(outputDir):
-						if 'GC_WC.tar.gz' in os.listdir(outputDir):
-							wildcardTar = os.path.join(outputDir, 'GC_WC.tar.gz')
-							try:
-								tarfile.TarFile.open(wildcardTar, 'r:gz').extractall(outputDir)
-								os.unlink(wildcardTar)
-							except Exception:
-								utils.eprint("Can't unpack output files contained in %s" % wildcardTar)
-					yield (currentJobNum, outputDir)
-					currentJobNum = None
-			retCode = proc.wait()
-
-			if retCode != 0:
-				if 'Keyboard interrupt raised by user' in proc.getError():
-					utils.removeFiles([log, basePath])
-					raise StopIteration
-				else:
-					proc.logError(self.errorLog, log = log)
-				utils.eprint('Trying to recover from error ...')
-				for dirName in os.listdir(basePath):
-					yield (None, os.path.join(basePath, dirName))
-		del activity
+		map_gc_id2jobnum = dict(gc_id_jobnum_list)
+		jobnum_list_todo = list(map_gc_id2jobnum.values())
+		wms_id_list_done = []
+		activity = Activity('retrieving %d job outputs' % len(gc_id_jobnum_list))
+		chunk_pos_iter = irange(0, len(gc_id_jobnum_list), self._chunk_size)
+		for ids in imap(lambda x: gc_id_jobnum_list[x:x + self._chunk_size], chunk_pos_iter):
+			for (current_jobnum, output_dn) in self.get_jobs_output_chunk(tmp_dn, ids, wms_id_list_done):
+				unpack_wildcard_tar(self._log, output_dn)
+				jobnum_list_todo.remove(current_jobnum)
+				yield (current_jobnum, output_dn)
+		activity.finish()
 
 		# return unretrievable jobs
-		for jobNum in todo:
-			yield (jobNum, None)
-		
-		purgeLog = tempfile.mktemp('.log')
-		purgeProc = utils.LoggedProcess(self._purgeExec, '--noint --logfile "%s" %s' % (purgeLog, " ".join(done)))
-		retCode = purgeProc.wait()
-		if retCode != 0:
-			if self.explainError(purgeProc, retCode):
+		for jobnum in jobnum_list_todo:
+			yield (jobnum, None)
+		self._purge_done_jobs(wms_id_list_done)
+		remove_files([tmp_dn])
+
+	def _make_jdl(self, jobnum, task):
+		return ['[\n'] + GridWMS._make_jdl(self, jobnum, task) + [
+			'OutputSandboxBaseDestUri = "gsiftp://localhost";\n]']
+
+	def _purge_done_jobs(self, wms_id_list_done):
+		purge_log_fn = tempfile.mktemp('.log')
+		purge_proc = LocalProcess(resolve_install_path('glite-ce-job-purge'),
+			'--noint', '--logfile', purge_log_fn, str.join(' ', wms_id_list_done))
+		exit_code = purge_proc.status(timeout=60)
+		if exit_code != 0:
+			if self._explain_error(purge_proc, exit_code):
 				pass
 			else:
-				proc.logError(self.errorLog, log = purgeLog, jobs = done)
-		utils.removeFiles([log, purgeLog, basePath])
-
-	def cancelJobs(self, allIds):
-		if len(allIds) == 0:
-			raise StopIteration
-
-		waitFlag = False
-		for ids in imap(lambda x: allIds[x:x+self._nJobsPerChunk], irange(0, len(allIds), self._nJobsPerChunk)):
-			# Delete jobs in groups of 5 - with 5 seconds between groups
-			if waitFlag and not utils.wait(5):
-				break
-			waitFlag = True
-
-			jobNumMap = dict(ids)
-			jobs = ' '.join(self._getRawIDs(ids))
-			log = tempfile.mktemp('.log')
-
-			activity = utils.ActivityLog('cancelling jobs')
-			proc = utils.LoggedProcess(self._cancelExec, '--noint --logfile "%s" %s' % (log, jobs))
-			retCode = proc.wait()
-			del activity
-
-			# select cancelled jobs
-			for rawId in self._getRawIDs(ids):
-				deletedWMSId = self._createId(rawId)
-				yield (jobNumMap.get(deletedWMSId), deletedWMSId)
-
-			if retCode != 0:
-				if self.explainError(proc, retCode):
-					pass
-				else:
-					proc.logError(self.errorLog, log = log)
-		
-			purgeLog = tempfile.mktemp('.log')
-			purgeProc = utils.LoggedProcess(self._purgeExec, '--noint --logfile "%s" %s' % (purgeLog, jobs))
-			retCode = purgeProc.wait()
-			if retCode != 0:
-				if self.explainError(purgeProc, retCode):
-					pass
-				else:
-					proc.logError(self.errorLog, log = purgeLog, jobs = jobs)
-			
-			utils.removeFiles([log, purgeLog])
+				self._log.log_process(purge_proc)
+		remove_files([purge_log_fn])

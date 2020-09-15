@@ -1,5 +1,5 @@
 #!/bin/bash
-# | Copyright 2008-2016 Karlsruhe Institute of Technology
+# | Copyright 2008-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -129,7 +129,7 @@ updatejobinfo() {
 	fi
 }
 
-checkfile() {
+gc_check_file_exists() {
 	debug_helper $FUNCNAME "$@"
 	echo -n "Checking for file $1 ... "
 	if [ ! -f "$1" ]; then
@@ -149,7 +149,7 @@ checkdir() {
 	getrealdir $2 && echo "$1 content:" && ls -al $2 && df -hP $2 && echo
 }
 
-checkbin() {
+gc_check_bin() {
 	debug_helper $FUNCNAME "$@"
 	[ "$(type -t $1)" == "function" ] && return
 	echo -n "Checking for binary $1 ... "
@@ -159,7 +159,7 @@ checkbin() {
 		echo "OK (`getcommand $1`)"
 	else
 		echo "FAILED"
-		checkfile $1
+		gc_check_file_exists $1
 		echo "`basename $1` not executable" 1>&2
 		fail 103
 	fi
@@ -179,8 +179,8 @@ checkvar() {
 
 getrealdir() {
 	debug_helper $FUNCNAME "$@"
-	[ -d "$1" ] && cd $1 && pwd -P && cd $OLDPWD && return `true`;
-	return `false`
+	[ -d "$1" ] && cd $1 && pwd -P && cd $OLDPWD && return 0;
+	return 1
 }
 
 getscratch() {
@@ -376,7 +376,7 @@ monitordirlimits() {
 
 print_and_eval() {
 	debug_helper $FUNCNAME "$@"
-	[ "$1" != " " ] && checkbin "$1" || shift
+	[ "$1" != " " ] && gc_check_bin "$1" || shift
 	CMD="$1"
 	shift
 	echo "$PAELEVEL`basename $CMD` $@"
@@ -393,7 +393,7 @@ print_and_eval() {
 
 url_ls_oneline() {
 	debug_helper $FUNCNAME "$@"
-	checkbin "$1" 1>&2
+	gc_check_bin "$1" 1>&2
 	eval "$1 $2" | awk '{sub(/\r$/,"")};1' | while read FILE; do
 		BASEDIR=$(dirname "$2")
 		case "$FILE" in
@@ -417,7 +417,7 @@ url_ls() {
 		"srm://"*)
 			BASE=''
 			LSCMD="`getcommand srmls`"
-			checkbin "$LSCMD" 1>&2
+			gc_check_bin "$LSCMD" 1>&2
 			eval "$LSCMD $1" | grep -v "WARNING" | while read TMP FILE; do
 				[ -z "$BASE" ] && BASE="$FILE" && continue
 				[ -z "$2" ] && echo ${FILE#$BASE} && continue
@@ -443,11 +443,12 @@ url_exists() {
 			[ "$(basename $EXCMD)" == "lcg-ls" ] && URL="sfn://${1#gsiftp://}" || URL="$1"
 			print_and_eval "$EXCMD" "$URL";;
 		"srm://"*)
-			EXCMD="`getcommand lcg-ls srm-check-permissions`"
-			[ "$(basename $EXCMD)" == "lcg-ls" ] && EXCMD="$EXCMD -b -T srmv2"
+			EXCMD="`getcommand gfal-ls srm-check-permissions`"
 			print_and_eval "$EXCMD" "$1";;
 		"file://"*)
 			print_and_eval " " "test" "-s ${1#file://}";;
+		"root://"*)
+			print_and_eval "xrdfs ${1/store*/} stat /store${1#*store}";;
 		*)
 			echo "Unsupported URL: $1" >&2 && fail 106;;
 	esac
@@ -506,15 +507,9 @@ url_copy_single_local() {
 url_copy_single_srm() {
 	debug_helper $FUNCNAME "$@"
 	RESULT=1
-	if [ "$(basename `getcommand lcg-cp`)" == "lcg-cp" ]; then
+	if [ "$(basename `getcommand gfal-copy`)" == "gfal-copy" ]; then
 		ARGS=""
-		# avoid using bdii: it is not configured at many sites (OSG)
-		if echo "$1" | grep "SFN=" > /dev/null; then
-			ARGS="-b -T srmv2"
-		elif echo "$2" | grep "SFN=" > /dev/null; then
-			ARGS="-b -U srmv2"
-		fi
-		print_and_eval "lcg-cp" $ARGS "-v -n 1" "$1" "$2"
+		print_and_eval "gfal-copy" $ARGS "-v -p -n 1" "$1" "$2"
 		RESULT=$?
 		if [ $RESULT -gt 0 ]; then
 			url_rm "$2" # continue later with srmcp
@@ -542,6 +537,13 @@ url_copy_connector() {
 url_copy_single() {
 	debug_helper $FUNCNAME "$@"
 	case "$1" in
+                "root://"*)
+			case "$2" in
+				"file://"*)
+					print_and_eval "`getcommand xrdcopy`" "-fp" "${1} $(dirname ${2#file:///})";;
+				*)
+					print_and_eval "url_copy_connector" "$1" "$2";;
+			esac;;
 		"rfio://"*)
 			case "$2" in
 				"file://"*)
@@ -572,6 +574,8 @@ url_copy_single() {
 			case "$2" in
 				"rfio://"*)
 					print_and_eval "`getcommand rfcp`" "${1#file://} ${2#rfio://}";;
+				"root://"*)
+					print_and_eval "`getcommand xrdcopy`" "-fp" "${1#file://} ${2}";;
 				"gsiftp://"*)
 					print_and_eval "`getcommand globus-url-copy`" "$1 $2";;
 				"srm://"*)
@@ -603,7 +607,7 @@ url_copy() {
 	SOURCE_FILES=""
 	SOURCE_URL="$1"
 	case "$SOURCE_URL" in
-		"rfio://"* | "gsiftp://"* | "srm://"* | "dir://"*)
+		"rfio://"* | "gsiftp://"* | "srm://"* | "dir://"* | "root://"*)
 			# copy from SE
 			SOURCE_URL="`echo "$SOURCE_URL" | sed -e 's@dir://@file://@'`"
 			if [[ "$FILENAMES" == *\** ]]; then
@@ -637,7 +641,7 @@ url_copy() {
 
 	TARGET_URL="$2"
 	case "$TARGET_URL" in
-		"rfio://"* | "gsiftp://"* | "srm://"* | "dir://"*)
+		"rfio://"* | "gsiftp://"* | "srm://"* | "dir://"* | "root://"*)
 			# copy to SE
 			TARGET_PATTERN="${SE_OUTPUT_PATTERN:-@X@}"
 			TARGET_URL="`echo "$TARGET_URL" | sed -e 's@dir://@file://@'`"

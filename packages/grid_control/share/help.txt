@@ -12,22 +12,27 @@
 	-a, --action             Specify job management actions and order
 	                            -a CHECK,RETRIEVAL,SUBMIT (default)
 	-s, --no-submission      Disable job submission
+	-n, --jobs <args>        Maximum number of jobs (truncated to task maximum)
+	                         Default: no limit (-1)
 	-m, --max-retry <args>   Set maximum number of job resubmission attempts
 	                         Default is to resubmit indefinitely
-	                            -m 0 (Disable job REsubmission)
+	                            -m 0 (Disable job resubmission)
 	                            -m 5 (Resubmit jobs up to 5 times)
 	-J, --job-selector <sel> Operate only on specified jobs
 	-d, --delete <sel>       Delete selected jobs
 	    --reset <sel>        Delete & reset selected jobs - resets also successful jobs
 
 	                         --- Module options ---
-	-q, --requery            Requery dataset information
+	-q, --resync             Resync dataset information
 	-o, --override <opt>     Override config options using "[section] option = value"
 
 	                         --- Display options ---
 	-G, --gui                Run in GUI mode
 	-v, --verbose            Give detailed information during run
-                                (use multiple times to increase verbosity)
+	                         (use multiple times to increase verbosity)
+	-l, --logging <opt>      Specify logger and log level using "<logger>:<level>"
+	                         (<level>: ERROR, CRITICAL, WARNING, INFO..INFO3, DEBUG...DEBUG3)
+	--debug                  Enable debug mode with high verbosity
 
 	                         --- Job selectors ---
 	                         The following job selectors are supported:

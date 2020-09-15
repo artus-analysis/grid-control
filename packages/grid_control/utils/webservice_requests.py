@@ -1,4 +1,4 @@
-# | Copyright 2016 Karlsruhe Institute of Technology
+# | Copyright 2016-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -15,23 +15,24 @@
 import requests
 from grid_control.utils.webservice import RestError, RestSession
 
+
 class RequestsSession(RestSession):
-	alias = ['requests']
+	alias_list = ['requests']
 	_session = None
 
 	def __init__(self):
-		if not self._session:
+		if not RequestsSession._session:
 			# disable ssl ca verification errors
 			requests.packages.urllib3.disable_warnings()
-			self._session = requests.Session()
+			RequestsSession._session = requests.Session()
 		RestSession.__init__(self)
 
-	def request(self, mode, url, headers, params = None, data = None, cert = None):
+	def request(self, mode, url, headers, params=None, data=None, cert=None):
 		request_fun = {RestSession.GET: self._session.get, RestSession.PUT: self._session.put,
 			RestSession.POST: self._session.post, RestSession.DELETE: self._session.delete}[mode]
-		response = request_fun(url = url, verify = False, cert = cert, headers = headers, params = params, data = data)
+		resp = request_fun(url=url, verify=False, cert=cert, headers=headers, params=params, data=data)
 		try:
-			response.raise_for_status()
+			resp.raise_for_status()
 		except Exception:
-			raise RestError('Request result: %s' % response.text)
-		return response.text
+			raise RestError('Request result: %s' % resp.text)
+		return resp.text

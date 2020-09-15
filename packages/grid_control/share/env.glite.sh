@@ -1,5 +1,5 @@
 #!/bin/bash
-# | Copyright 2009-2016 Karlsruhe Institute of Technology
+# | Copyright 2009-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-# grid-control: https://ekptrac.physik.uni-karlsruhe.de/trac/grid-control
+# Source: github.com/grid-control
 
 echo "Searching for GRID environment..."
 
@@ -29,7 +29,7 @@ gc_find_grid() {
 
 	if [ -f "$2" ]; then
 		echo "       Found script $2"
-		source "$2" # shellcheck source=/dev/null
+		. "$2" # shellcheck source=/dev/null
 	else
 		echo "       Script '$2' does not exist!"
 		return 1
@@ -47,7 +47,7 @@ gc_find_grid() {
 			echo "export $VAR=''"
 		fi
 	done > "$VO_REVERT"
-	source "$VO_REVERT" # shellcheck source=/dev/null
+	. "$VO_REVERT" # shellcheck source=/dev/null
 	rm "$VO_KEEPER" "$VO_REVERT"
 	return 0
 }
@@ -66,7 +66,7 @@ if [ -n "$GLITE_LOCATION" ]; then
 	GC_GLITE_TYPE="LOCAL"
 elif gc_find_grid "USER" "$GC_GLITE_LOCATION"; then
 	GC_GLITE_TYPE="USER"
-elif gc_find_grid "CVMFS" $(ls -1t /cvmfs/grid.cern.ch/*/etc/profile.d/setup*.sh 2> /dev/null | head -n 1); then
+elif gc_find_grid "CVMFS" "/cvmfs/grid.cern.ch/emi3ui-latest/etc/profile.d/setup-ui-example.sh"; then
 	GC_GLITE_TYPE="CVMFS"
 elif gc_find_grid "CVMFS - 2nd try" $(ls -1t /cvmfs/grid.cern.ch/*/etc/profile.d/grid*.sh 2> /dev/null | head -n 1); then
 	GC_GLITE_TYPE="CVMFS-2"

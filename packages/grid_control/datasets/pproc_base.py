@@ -1,4 +1,4 @@
-# | Copyright 2015-2016 Karlsruhe Institute of Technology
+# | Copyright 2015-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -13,44 +13,57 @@
 # | limitations under the License.
 
 import logging
+from grid_control.config import join_config_locations
 from grid_control.gc_plugin import ConfigurablePlugin
-from grid_control.utils import display_selection, filter_processors
-from grid_control.utils.gc_itertools import lchain
+from grid_control.utils import prune_processors
 from hpfwk import AbstractError
-from python_compat import imap
+from python_compat import imap, lchain
 
-# Class used by DataParameterSource to convert dataset splittings into parameter data
+
 class PartitionProcessor(ConfigurablePlugin):
-	def __init__(self, config):
+	# Class used by DataParameterSource to convert dataset splittings into parameter data
+	def __init__(self, config, datasource_name):
 		ConfigurablePlugin.__init__(self, config)
-		self._log = logging.getLogger('partproc')
+		self._datasource_name = datasource_name
+		self._log = logging.getLogger('%s.partition.processor' % datasource_name)
+
+	def __repr__(self):
+		return self._repr_base()
 
 	def enabled(self):
 		return True
 
-	def getKeys(self):
+	def get_needed_vn_list(self, splitter):
 		return []
 
-	def getNeededKeys(self, splitter):
+	def get_partition_metadata(self):
 		return []
 
-	def process(self, pNum, splitInfo, result):
+	def process(self, pnum, partition_info, result):
 		raise AbstractError
+
+	def _get_pproc_opt(self, opt):
+		return join_config_locations(['', self._datasource_name], 'partition', opt)
 
 
 class MultiPartitionProcessor(PartitionProcessor):
-	def __init__(self, config, processorList):
-		PartitionProcessor.__init__(self, config)
-		self._processorList = filter_processors(processorList)
-		display_selection(self._log, processorList, self._processorList,
-			'Removed %d inactive partition processors!', lambda item: item.__class__.__name__)
+	alias_list = ['multi']
 
-	def getKeys(self):
-		return lchain(imap(lambda p: p.getKeys(), self._processorList))
+	def __init__(self, config, processor_list, datasource_name):
+		PartitionProcessor.__init__(self, config, datasource_name)
+		do_prune = config.get_bool(self._get_pproc_opt('processor prune'), True)
+		self._processor_list = prune_processors(do_prune, processor_list,
+			self._log, 'Removed %d inactive partition processors!')
 
-	def getNeededKeys(self, splitter):
-		return lchain(imap(lambda p: p.getNeededKeys(splitter), self._processorList))
+	def __repr__(self):
+		return str.join(' => ', imap(repr, self._processor_list))
 
-	def process(self, pNum, splitInfo, result):
-		for processor in self._processorList:
-			processor.process(pNum, splitInfo, result)
+	def get_needed_vn_list(self, splitter):
+		return lchain(imap(lambda p: p.get_needed_vn_list(splitter) or [], self._processor_list))
+
+	def get_partition_metadata(self):
+		return lchain(imap(lambda p: p.get_partition_metadata() or [], self._processor_list))
+
+	def process(self, pnum, partition_info, result):
+		for processor in self._processor_list:
+			processor.process(pnum, partition_info, result)

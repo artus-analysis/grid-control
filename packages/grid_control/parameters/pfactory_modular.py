@@ -1,4 +1,4 @@
-# | Copyright 2012-2016 Karlsruhe Institute of Technology
+# | Copyright 2012-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,34 +12,23 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-import logging
 from grid_control.parameters.pfactory_base import UserParameterFactory
-from grid_control.parameters.psource_base import ParameterError, ParameterSource
+from grid_control.parameters.psource_base import ParameterSource
+from python_compat import ifilter, partial, sorted
 
-# Parameter factory which evaluates a parameter module string
+
 class ModularParameterFactory(UserParameterFactory):
-	alias = ['modular']
+	# Parameter factory which evaluates a parameter module string
+	alias_list = ['modular']
 
-	def _getUserSource(self, pExpr):
-		# Wrap psource factory functions
-		def createWrapper(clsName):
-			def wrapper(*args):
-				try:
-					parameterClass = ParameterSource.getClass(clsName)
-				except Exception:
-					raise ParameterError('Unable to create parameter source "%r"!' % clsName)
-				try:
-					return parameterClass.create(self._paramConfig, *args)
-				except Exception:
-					raise ParameterError('Error while creating "%r" with arguments "%r"' % (parameterClass.__name__, args))
-			return wrapper
-		userFun = {}
-		for clsInfo in ParameterSource.getClassList():
-			for clsName in clsInfo.keys():
-				if clsName != clsInfo[clsName] and (clsName != 'depth'):
-					userFun[clsName] = createWrapper(clsInfo[clsName])
+	def _get_psrc_user(self, pexpr, repository):
+		user_functions = {}
+		for cls_info in ParameterSource.get_class_info_list():
+			for cls_name in ifilter(lambda name: name != 'depth', cls_info.keys()):
+				user_functions[cls_name] = partial(ParameterSource.create_psrc_safe,
+					cls_name, self._parameter_config, repository)
 		try:
-			return eval(pExpr, userFun) # pylint:disable=eval-used
+			return eval(pexpr, dict(user_functions))  # pylint:disable=eval-used
 		except Exception:
-			logging.getLogger('user').warning('Available functions: %s', userFun.keys())
+			self._log.warning('Available functions: %s', sorted(user_functions.keys()))
 			raise
