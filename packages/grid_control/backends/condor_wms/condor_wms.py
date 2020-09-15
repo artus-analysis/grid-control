@@ -30,7 +30,7 @@ from python_compat import imap, irange, lfilter, lmap, lzip, md5_hex
 
 
 # if the ssh stuff proves too hack'y: http://www.lag.net/paramiko/
-PoolType = make_enum(['LOCAL', 'SPOOL', 'SSH', 'GSISSH'])  # pylint:disable=invalid-name
+PoolType = make_enum(['LOCAL', 'SPOOL', 'SSH', 'GSISSH', 'GRIDC'])  # pylint:disable=invalid-name
 
 
 class CondorJDLWriter(object):
@@ -74,6 +74,7 @@ class Condor(BasicWMS):
 		# load keys for condor pool ClassAds
 		self._jdl_writer = CondorJDLWriter(config)
 		self._universe = config.get('universe', 'vanilla', on_change=None)
+		self._grid_resource = config.get('grid_resource', '', on_change=None)
 		self._pool_req_dict = config.get_dict('poolArgs req', {})[0]
 		self._pool_work_dn = None
 		self._proc_factory = None
@@ -95,7 +96,7 @@ class Condor(BasicWMS):
 		# overwrite for check/submit/fetch intervals
 		if self._remote_type in (PoolType.SSH, PoolType.GSISSH):
 			return Result(wait_on_idle=30, wait_between_steps=5)
-		elif self._remote_type == PoolType.SPOOL:
+		elif self._remote_type in (PoolType.SPOOL, PoolType.GRIDC):
 			return Result(wait_on_idle=60, wait_between_steps=10)
 		else:
 			return Result(wait_on_idle=20, wait_between_steps=5)
@@ -212,14 +213,21 @@ class Condor(BasicWMS):
 		# header for all jobs
 		jdl_str_list = [
 			'Universe = ' + self._universe,
-			'Executable = ' + script_cmd,
+			'Executable = ' + (sb_in_fn_list[0] if self._remote_type == PoolType.GRIDC else script_cmd),
+
 		]
+		if self._remote_type == PoolType.GRIDC:
+			jdl_str_list.extend([
+				'use_x509userproxy = True',
+				'grid_resource = %s' % self._grid_resource,
+			])
+		else:
+			jdl_str_list.append('transfer_executable = false')
 		jdl_str_list.extend(self._jdl_writer.get_jdl())
 		jdl_str_list.extend([
 			'Log = ' + os.path.join(self._get_remote_output_dn(), 'GC_Condor.%s.log') % self._task_id,
 			'should_transfer_files = YES',
 			'when_to_transfer_output = ON_EXIT',
-			'transfer_executable = false',
 		])
 		# cancel held jobs - ignore spooling ones
 		remove_cond = '(JobStatus == 5 && HoldReasonCode != 16)'
@@ -283,11 +291,15 @@ class Condor(BasicWMS):
 			# only copy important files - stdout and stderr get remapped but transferred
 			# automatically, so don't request them as they would not be found
 			'transfer_output_files = ' + str.join(', ', sb_out_fn_list),
-			'initialdir = ' + workdir,
 			'Output = ' + os.path.join(workdir, "gc.stdout"),
 			'Error = ' + os.path.join(workdir, "gc.stderr"),
 			'arguments = %s ' % jobnum
 		]
+		if self._remote_type == PoolType.GRIDC:
+			sb_out_fn_remaps_list = ['"' + fn + ' = ' + os.path.join(workdir, fn) + '"' for fn in sb_out_fn_list]
+			jdl_str_list.append('transfer_output_remaps = ' + str.join('; ', sb_out_fn_remaps_list))
+		else:
+			jdl_str_list.append('initialdir = ' + workdir)
 		jdl_str_list.extend(self._get_jdl_req_str_list(jobnum, task))
 		jdl_str_list.append('Queue\n')
 		return jdl_str_list
@@ -323,7 +335,7 @@ class Condor(BasicWMS):
 
 	def _get_remote_output_dn(self, jobnum=''):
 		# return path to condor output dir for a specific job or basepath
-		if self._remote_type in (PoolType.LOCAL, PoolType.SPOOL):
+		if self._remote_type in (PoolType.LOCAL, PoolType.SPOOL, PoolType.GRIDC):
 			return self._get_sandbox_dn(jobnum)
 		else:
 			# ssh and gsissh require a remote working directory
@@ -353,11 +365,11 @@ class Condor(BasicWMS):
 	def _init_pool_interface(self, config):
 		# prepare commands and interfaces according to selected submit type
 		# remote submissal requires different access to Condor tools
-		# local : remote == ''          => condor_q job.jdl
+		# local/cgrid : remote == ''          => condor_q job.jdl
 		# remote: remote == <pool>      => condor_q -remote <pool> job.jdl
 		# ssh   : remote == <user@pool> => ssh <user@pool> 'condor_q job.jdl'
 		(user, sched, collector) = self._get_dest(config)
-		if self._remote_type in (PoolType.LOCAL, PoolType.SPOOL):
+		if self._remote_type in (PoolType.LOCAL, PoolType.SPOOL, PoolType.GRIDC):
 			self._init_pool_interface_local(config, sched, collector)
 		else:
 			# ssh type instructions are passed to the remote host via regular ssh/gsissh
